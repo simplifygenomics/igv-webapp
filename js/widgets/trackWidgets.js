@@ -6,26 +6,37 @@
  */
 
 
-import {ModalTable, GenericDataSource} from '../../node_modules/data-modal/src/index.js'
-import {igvxhr} from '../../node_modules/igv-utils/src/index.js'
-import {encodeTrackDatasourceConfigurator, supportsGenome} from './encodeTrackDatasourceConfigurator.js'
+import {ModalTable} from '../../node_modules/data-modal/src/index.js'
+import {igvxhr, URIUtils} from '../../node_modules/igv-utils/src/index.js'
+import * as GooglePicker from './googleFilePicker.js'
+import {encodeTrackDatasourceConfigurator, supportsENCODE} from './encodeTrackDatasourceConfigurator.js'
 import alertSingleton from './alertSingleton.js'
 import {createTrackURLModalElement} from './trackURLModal.js'
 import URLLoadWidget from "./urlLoadWidget.js"
 import MultipleTrackLoadHelper from "./multipleTrackLoadHelper.js"
 import createTrackSelectionModal from './trackSelectionModal.js'
 import * as Utils from './utils.js'
-import {GooglePicker} from "../../node_modules/igv-utils/src/index.js"
 import {initializeDropbox} from "./dropbox.js"
 import igv from '../../node_modules/igv/dist/igv.esm.js'
+import createTrackSelectionListModal from "./trackSelectionListModal.js"
 
 const id_prefix = 'genome_specific_'
+
+// Helper to construct a canonical track identifier from a track or track-like object.
+// Uses optional chaining and nullish coalescing so only null/undefined fall back to empty string.
+function trackId(track) {
+    return `${track?.url ?? ''}-${track?.name ?? ''}`
+}
 
 let encodeModalTables = []
 let customModalTables = []
 let trackLoadHandler
 
-const encodeTrackModalIds = ['igv-app-encode-signals-chip-modal', 'igv-app-encode-signals-other-modal', 'igv-app-encode-others-modal']
+const encodeTrackModalIds = [
+    'igv-app-encode-signals-chip-modal',
+    'igv-app-encode-signals-other-modal',
+    'igv-app-encode-others-modal',
+    'igv-app-encode-hic-modal']
 
 let trackRegistry
 
@@ -56,14 +67,15 @@ async function createTrackWidgets(igvMain, browser, config) {
 
     // Local files
     const localFileInput = document.getElementById('igv-app-dropdown-local-track-file-input')
-    localFileInput.addEventListener('change', async () => {
-        if (localFileInput.files && localFileInput.files.length > 0) {
-            const {files} = localFileInput
-            const paths = Array.from(files)
-            localFileInput.value = ''
-            await trackLoadHelper.loadPaths(paths)
-        }
-    })
+    if (localFileInput) {
+        localFileInput.addEventListener('change', async () => {
+            if (localFileInput.files && localFileInput.files.length > 0) {
+                const {files} = localFileInput
+                await trackLoadHelper.loadTrackFiles(Array.from(files).map(f => ({path: f, name: f.name})))
+                localFileInput.value = ''
+            }
+        })
+    }
 
     // Load from URL
     const urlModalId = 'igv-app-track-from-url-modal'
@@ -80,8 +92,11 @@ async function createTrackWidgets(igvMain, browser, config) {
     })
 
     Utils.configureModal(urlLoadWidget, urlLoadModal, async urlLoadWidget => {
-        const paths = urlLoadWidget.retrievePaths()
-        await trackLoadHelper.loadPaths(paths)
+        const urls = urlLoadWidget.retrievePaths()
+        await trackLoadHelper.loadTrackFiles(urls.map(url => {
+            const name = URIUtils.parseUri(url).file
+            return {path: url, name: name}
+        }))
         return true
     })
 
@@ -96,12 +111,17 @@ async function createTrackWidgets(igvMain, browser, config) {
             if (true === result) {
                 const obj =
                     {
-                        success: dbFiles => trackLoadHelper.loadPaths(dbFiles.map(({link}) => link)),
+                        success: dbFiles => {
+                            return trackLoadHelper.loadTrackFiles(dbFiles.map(({link, name}) => ({
+                                path: link,
+                                name: name
+                            })))
+                        },
                         cancel: () => {
                         },
-                        linkType: "preview",
+                        linkType: "direct",
                         multiselect: true,
-                        folderselect: false,
+                        folderselect: false
                     }
 
                 Dropbox.choose(obj)
@@ -117,42 +137,51 @@ async function createTrackWidgets(igvMain, browser, config) {
     if (googleDriveButton) {
         googleDriveButton.addEventListener('click', () => {
             GooglePicker.createDropdownButtonPicker(true,
-                async responses => await trackLoadHelper.loadPaths(responses.map(({name, url}) => url)))
+                async responses => {
+                    await trackLoadHelper.loadTrackFiles(responses.map(response => {
+                        const {id, name} = response
+                        return {
+                            path: `https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true`,
+                            name
+                        }
+                    }))
+                })
         })
     }
 
 
     // Prepare ENCODE modal tables -- these are resued for all genomes that support ENCODE
-    for (let modalID of encodeTrackModalIds) {
-        const encodeModalTableConfig =
-            {
-                id: modalID,
-                title: 'ENCODE',
-                selectionStyle: 'multi',
-                pageLength: 100,
-                okHandler: trackLoadHandler
-            }
-        encodeModalTables.push(new ModalTable(encodeModalTableConfig))
+    if (encodeModalTables.length === 0) {
+        for (let modalID of encodeTrackModalIds) {
+            const encodeModalTableConfig =
+                {
+                    id: modalID,
+                    title: 'ENCODE',
+                    // selectionStyle: 'multi',
+                    pageLength: 100,
+                    okHandler: trackLoadHandler
+                }
+            encodeModalTables.push(new ModalTable(encodeModalTableConfig))
+        }
     }
-
 }
+
 
 async function trackMenuGenomeChange(browser, genome) {
 
-    // Remove existing items
+    const genomeID = genome.id
+
+    // Remove existing genome specific items
     const $dropdownMenu = $('#igv-app-track-dropdown-menu')
-    discardTrackMenuItems($dropdownMenu)
+    const $divider = $dropdownMenu.find('#igv-app-annotations-section')
+    $divider.nextAll().remove()
+
     customModalTables.forEach(modalTable => modalTable.remove())
     customModalTables = []
 
-    const genomeID = genome.id
-
-    const $divider = $dropdownMenu.find('#igv-app-annotations-section')
-
-    if (true === supportsGenome(genomeID)) {
+    if (true === supportsENCODE(genomeID)) {
         addEncodeButtons(genomeID, $divider)
     }
-
 
     const trackMenuConfigurations = trackRegistry ? await getTrackMenuConfigurationsFromRegistry(genome.id) : []
 
@@ -197,47 +226,49 @@ async function trackMenuGenomeChange(browser, genome) {
                 .on('click', () => {
 
                     // Collect url-name pairs for loaded tracks with urls.  This will serve as unique IDs to compare with track configs
-                    const loadedIDs = browser ? new Set(browser.findTracks(t => t.url).map(t => `${t.url}-${t.name}`)) : new Set()
+                    const loadedIDs = browser ? new Set(browser.findTracks(true).map(t => trackId(t))) : new Set()
 
                     // Annotate track config objects with a unique ID comprised of url + name
-                    const annotateTracks = (section) => {
-                        if (section.tracks) {
-                            for (const track of section.tracks) {
-                                track._id = `${track.url}-${track.name}`
-                                track._checked = loadedIDs.has(track._id)
+                    const annotateTracks = (groups) => {
+                        if (groups.tracks) {
+                            for (const track of groups.tracks) {
+                                track._id = trackId(track)
+                                track._loaded = loadedIDs.has(track._id)
                             }
                         }
-                        if (section.children) for (const child of section.children) {
+                        if (groups.children) for (const child of groups.children) {
                             annotateTracks(child)
                         }
                     }
-                    for (const group of config.sections) {
+                    for (const group of config.groups) {
                         annotateTracks(group)
                     }
 
-                    config.okHandler = (checkedTracks, uncheckedTracks) => {
-
-                        // Remove tracks that are unchecked
+                    config.okHandler = async (checkedTracks, uncheckedTracks) => {
                         const uncheckedIDs = new Set(uncheckedTracks.map(s => s._id))
                         const toUnload = new Set(Array.from(loadedIDs).filter(id => uncheckedIDs.has(id)))
-                        browser.findTracks(track => toUnload.has(`${track.url}-${track.name}`))
+                        browser.findTracks(track => toUnload.has(trackId(track)))
                             .forEach(track => browser.removeTrack(track))
 
-                        const trackConfigs = checkedTracks.filter(config => !loadedIDs.has(`${config.url}-${config.name}`))
+                        const trackConfigs = checkedTracks.filter(c => !loadedIDs.has(trackId(c)))
                         if (trackConfigs.length > 0) {
                             try {
-                                trackLoadHandler(trackConfigs)
+                                await trackLoadHandler(trackConfigs)
                             } catch (e) {
                                 console.error(e)
                                 alertSingleton.present(e)
                             }
                         }
                     }
+
                     config.cancelHandler = () => {
                         modal.hide()
                     }
 
-                    const modal = createTrackSelectionModal(config)
+                    const modal = 'list' === config.type ?
+                        createTrackSelectionListModal(config) :
+                        createTrackSelectionModal(config)
+
                     modal.show()
                 })
         }
@@ -248,27 +279,38 @@ async function trackMenuGenomeChange(browser, genome) {
 function prepRegistryConfig(registry) {
 
     if ('custom-data-modal' === registry.type) {
+        // Default custom modal to use igvxhr for string loading.   igvxhr supports Google auth, the default "fetch"
+        // implementation does not.   See the data-modal project for more details
+        registry.igvxhr = registry.igvxhr || igvxhr
         const customModalTable = new ModalTable({
+            type: registry.type,
             id: `igv-custom-modal-${Math.random().toString(36).substring(2, 9)}`,
             title: registry.label,
             okHandler: trackLoadHandler,
-            selectionStyle: 'multi',
+            // selectionStyle: 'multi',
             pageLength: 100,
-            datasource: new GenericDataSource(registry),
+            datasource: Utils.createDataSource(registry),
             description: registry.description
         })
         customModalTables.push(customModalTable)
         registry.customModalTable = customModalTable
         return registry
     } else {
+
+        const groups = registry.groups || [{
+            label: registry.label,
+            tracks: registry.tracks
+        }]
+
+        // Default modal type to 'track-selection-modal' if no groups, or 'hub' if groups present
+        const defaultType = registry.groups ? 'hub' : 'track-selection-modal'
+
         return {
+            type: registry.type || defaultType,
             id: `_${Math.random().toString(36).substring(2, 9)}`,
             label: registry.label,
             description: registry.description,
-            sections: [{
-                label: registry.label,
-                tracks: registry.tracks
-            }],
+            groups: groups
         }
     }
 }
@@ -279,24 +321,36 @@ async function prepHubConfig(hubURL, genomeID) {
     let descriptionUrl = hub.getDescriptionUrl()
     const groups = await hub.getGroupedTrackConfigurations(genomeID)
     return {
+        type: 'hub',
         id: `_${Math.random().toString(36).substring(2, 9)}`,
         label: `${hub.getShortLabel()}`,
         description: descriptionUrl ? `<a target=_blank href="${descriptionUrl}">${hub.getLongLabel()}</a>` : '',
-        sections: groups
+        groups: groups
     }
 }
 
 
 function addEncodeButtons(genomeID, $divider) {
 
-    encodeModalTables[0].setDatasource(new GenericDataSource(encodeTrackDatasourceConfigurator(genomeID, 'signals-chip')))
-    encodeModalTables[1].setDatasource(new GenericDataSource(encodeTrackDatasourceConfigurator(genomeID, 'signals-other')))
-    encodeModalTables[2].setDatasource(new GenericDataSource(encodeTrackDatasourceConfigurator(genomeID, 'other')))
+    const hasHIC = genomeID.startsWith("hg") || genomeID.startsWith("mm")
+
+    encodeModalTables[0].setDatasource(Utils.createDataSource(encodeTrackDatasourceConfigurator(genomeID, 'signals-chip')))
+    encodeModalTables[1].setDatasource(Utils.createDataSource(encodeTrackDatasourceConfigurator(genomeID, 'signals-other')))
+    encodeModalTables[2].setDatasource(Utils.createDataSource(encodeTrackDatasourceConfigurator(genomeID, 'other')))
 
     const description = "<a href=https://www.encodeproject.org/ target=_blank>Encylopedia of Genomic Elements</a>"
     encodeModalTables[0].setDescription(description)
     encodeModalTables[1].setDescription(description)
     encodeModalTables[2].setDescription(description)
+
+    if (hasHIC) {
+        encodeModalTables[3].setDatasource(Utils.createDataSource(encodeTrackDatasourceConfigurator(genomeID, 'hic')))
+        encodeModalTables[3].setDescription(description)
+        if (hasHIC) {
+            createDropdownButton($divider, 'ENCODE HIC', id_prefix)
+                .on('click', () => encodeModalTables[3].modal.show())
+        }
+    }
 
     createDropdownButton($divider, 'ENCODE Other', id_prefix)
         .on('click', () => encodeModalTables[2].modal.show())
@@ -306,19 +360,17 @@ function addEncodeButtons(genomeID, $divider) {
 
     createDropdownButton($divider, 'ENCODE Signals - ChIP', id_prefix)
         .on('click', () => encodeModalTables[0].modal.show())
+
 }
 
 
 /**
- * Called upon a genome change.
- *
- * @param genomeID
- * @param trackConfigurations
- * @param $dropdownMenu
- * @param trackLoadHandler
- * @returns {Promise<void>}
+ * Create a dropdown button and insert it after the annotations divider.
+ * @param {JQuery} $divider
+ * @param {string} buttonText
+ * @param {string} id_prefix
+ * @returns {JQuery}
  */
-
 function createDropdownButton($divider, buttonText, id_prefix) {
     const $button = $('<button>', {class: 'dropdown-item', type: 'button'})
     $button.text(`${buttonText} ...`)
@@ -356,17 +408,7 @@ async function getTrackMenuConfigurationsFromRegistry(genomeID) {
 }
 
 
-function discardTrackMenuItems($dropdownMenu) {
-
-    $dropdownMenu.find('.dropdown-divider')
-    const searchString = '[id^=' + id_prefix + ']'
-    const $found = $dropdownMenu.find(searchString)
-    $found.remove()
-
-}
-
 export {
     trackMenuGenomeChange,
     createTrackWidgets
 }
-

@@ -1,5 +1,5 @@
 import alertSingleton from './alertSingleton.js'
-import {GooglePicker} from "../../node_modules/igv-utils/src/index.js"
+import * as GooglePicker from './googleFilePicker.js'
 import {initializeDropbox} from "./dropbox.js"
 
 /**
@@ -16,7 +16,7 @@ class FileLoad {
             if (true === FileLoad.isValidLocalFileInput(localFileInput)) {
 
                 try {
-                    await this.loadPaths(Array.from(localFileInput.files))
+                    await this.loadFiles(Array.from(localFileInput.files).map(file => ({path: file, name: file.name})))
                 } catch (e) {
                     console.error(e)
                     alertSingleton.present(e)
@@ -35,17 +35,15 @@ class FileLoad {
 
                     const config =
                         {
-                            success: async dbFiles => {
-                                try {
-                                    await this.loadPaths(dbFiles.map(dbFile => dbFile.link))
-                                } catch (e) {
-                                    console.error(e)
-                                    alertSingleton.present(e)
-                                }
+                            success: dbFiles => {
+                                return this.loadFiles(dbFiles.map(({link, name}) => ({
+                                    path: link,
+                                    name: name
+                                })))
                             },
                             cancel: () => {
                             },
-                            linkType: 'preview',
+                            linkType: 'direct',
                             multiselect: true,
                             folderselect: false,
                         }
@@ -62,9 +60,8 @@ class FileLoad {
         if (googleDriveButton) {
             googleDriveButton.addEventListener('click', () => {
                 GooglePicker.createDropdownButtonPicker(true, async responses => {
-
                     try {
-                        await this.loadPaths(responses.map(({url}) => url))
+                        await this.loadFiles(responses.map(({id, name}) => ({path: `https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsTeamDrives=true`, name})))
                     } catch (e) {
                         console.error(e)
                         alertSingleton.present(e)
@@ -73,11 +70,14 @@ class FileLoad {
             })
 
         }
-
     }
 
-    async loadPaths(paths) {
-        //console.log('FileLoad: loadPaths(...)');
+    /**
+     * Load files from an array of file descriptors
+     * `descriptors`: array of { path: File|string, name?: string }.
+     */
+    async loadFiles(descriptors) {
+        throw new Error('loadFiles method must be implemented by subclass')
     }
 
     static isValidLocalFileInput(input) {

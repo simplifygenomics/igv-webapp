@@ -14,19 +14,21 @@ function encodeTrackDatasourceConfigurator(genomeId, type) {
 
     switch (type) {
         case 'signals-chip':
-            url = `${root}${canonicalId(genomeId)}.signals.chip.txt.gz`
+            url = `${root}${canonicalId(genomeId)}.signals.chip.txt`
             break
         case 'signals-other':
-            url = `${root}${canonicalId(genomeId)}.signals.other.txt.gz`
+            url = `${root}${canonicalId(genomeId)}.signals.other.txt`
+            break
+        case 'hic':
+            url = `${root}${canonicalId(genomeId)}.hic.txt`
             break
         case 'other':
-            url = `${root}${canonicalId(genomeId)}.other.txt.gz`
+            url = `${root}${canonicalId(genomeId)}.other.txt`
             break
 
     }
 
     return {
-        igvxhr: igvxhr,     // Neccessary to handle gzip files
         isJSON: false,
         url,
         sort: encodeSort,
@@ -37,14 +39,14 @@ function encodeTrackDatasourceConfigurator(genomeId, type) {
                 'Biosample',
                 'AssayType',
                 'Target',
-                'BioRep',
-                'TechRep',
                 'OutputType',
                 'Format',
                 'Lab',
                 //'HREF',         // hide
                 'Accession',
-                'Experiment'
+                'Experiment',
+                'BioRep',
+                'TechRep'
             ],
         columnDefs:
             {
@@ -65,8 +67,8 @@ function encodeTrackDatasourceConfigurator(genomeId, type) {
 }
 
 
-function supportsGenome(genomeId) {
-    const knownGenomes = new Set(["ce10", "ce11", "dm3", "dm6", "GRCh38", "hg19", "mm9", "mm10"])
+function supportsENCODE(genomeId) {
+    const knownGenomes = new Set(["ce10", "ce11", "dm3", "dm6", "GRCh38", "GRCh39", "hg19", "mm9", "mm10", "hs1", "T2T-CHM13"])
     const id = canonicalId(genomeId)
     return knownGenomes.has(id)
 }
@@ -192,4 +194,4 @@ function colorForTarget(target) {
 }
 
 
-export {encodeTrackDatasourceConfigurator, supportsGenome}
+export {encodeTrackDatasourceConfigurator, supportsENCODE}

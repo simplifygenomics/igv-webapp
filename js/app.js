@@ -22,7 +22,7 @@
  */
 
 import igv from '../node_modules/igv/dist/igv.esm.js'
-import * as GoogleAuth from '../node_modules/google-utils/src/googleAuth.js'
+import * as GoogleAuth from '../node_modules/igv-utils/src/google-utils/googleAuth.js'
 import makeDraggable from "./widgets/utils/draggable.js"
 import alertSingleton from "./widgets/alertSingleton.js"
 import {createSessionWidgets} from "./widgets/sessionWidgets.js"
@@ -47,21 +47,14 @@ import {igvxhr} from '../node_modules/igv-utils/src/index.js'
 import NotificationDialog from "./widgets/notificationDialog.js"
 import {createToolsWidgets} from "./widgets/toolsWidgets.js"
 import {createSampleInfoWidgets} from "./widgets/sampleInfoWidgets.js"
-
+import {setupScrollWheelZoom, setupKeyboardZoom} from "./hotkeys.js"
 
 document.addEventListener("DOMContentLoaded", async (event) => await main(document.getElementById('igv-app-container'), igvwebConfig))
 
 let isDropboxEnabled = false
-
 let isGoogleEnabled
 let isGoogleDriveEnabled
-
 let currentGenomeId
-const googleWarningFlag = "googleWarningShown"
-
-let svgSaveImageModal
-let pngSaveImageModal
-
 let notificationDialog
 
 async function main(container, config) {
@@ -77,7 +70,7 @@ async function main(container, config) {
 
     isDropboxEnabled = undefined !== config.dropboxAPIKey
     isGoogleEnabled = undefined !== config.clientId
-    isGoogleDriveEnabled = config.googleDriveEnabled && isGoogleEnabled
+    isGoogleDriveEnabled = config.googleDriveEnabled === true
 
     configureCloudButtons(config)
 
@@ -88,6 +81,7 @@ async function main(container, config) {
             await GoogleAuth.init({
                 client_id: config.clientId,
                 apiKey: config.apiKey,
+                appId: config.appId,
                 scope: 'https://www.googleapis.com/auth/userinfo.profile',
             })
 
@@ -96,6 +90,13 @@ async function main(container, config) {
             alertSingleton.present(str)
             console.error(str)
         }
+    }
+
+    // If a proxy is defined for CORS errors, set it here.  Currently igv and igv-webapp maintain separate instances
+    // of igvxhr, set it in both places.   TODO -- unify igvxhr instances
+    if (config.corsProxy) {
+        igvxhr.corsProxy = config.corsProxy
+        igv.setCORSProxy(config.corsProxy)
     }
 
     // Load pre-defined genomes for use by igv.js and webapp
@@ -139,9 +140,9 @@ async function main(container, config) {
 
     } catch (e) {
         // Try configured genome
-        if(igvConfigGenome !== igvConfig.genome) {
+        if (igvConfigGenome !== igvConfig.genome) {
             igvConfig.genome = igvConfigGenome
-            if(browser) {
+            if (browser) {
                 igv.removeBrowser(browser)
             }
             browser = await igv.createBrowser(container, igvConfig)
@@ -179,15 +180,19 @@ async function main(container, config) {
     await createTrackWidgets(igvMain, browser, config)
 
     browser.on("genomechange", async ({genome, trackConfigurations}) => {
-            if (currentGenomeId !== genome.id) {
-                currentGenomeId = genome.id
-                await trackMenuGenomeChange(browser, genome)
-            }
-        })
+        if (currentGenomeId !== genome.id) {
+            currentGenomeId = genome.id
+            await trackMenuGenomeChange(browser, genome)
+        }
+    })
     // Manually fire the genome change event to initialize the track menu.
     await trackMenuGenomeChange(browser, browser.genome)
 
+    // Add scroll wheel zoom support with shift key modifier
+    setupScrollWheelZoom(container, browser)
 
+    // Add keyboard shortcuts for zoom in/out
+    setupKeyboardZoom(browser)
 
     createAppBookmarkHandler($('#igv-app-bookmark-button'))
 
@@ -243,7 +248,6 @@ async function main(container, config) {
             document.getElementById('igv-app-circular-view-resize-modal-input').value = circularViewContainer.clientWidth.toString()
         })
     }
-
 }
 
 
